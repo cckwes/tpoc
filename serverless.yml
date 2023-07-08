@@ -1,0 +1,46 @@
+service: tpoc
+
+provider:
+  name: aws
+  stage: ${opt:stage, 'dev'}
+  region: ap-southeast-1
+  runtime: nodejs16.x
+  environment:
+    TRANSFER_QUEUE: ${self:provder.stage}-transfer-queue
+  iam:
+    role:
+      statements:
+        - Effect: Allow
+          Action:
+            - sqs:GetQueueAttributes
+            - sqs:ReceiveMessage
+            - sqs:DeleteMessage
+            - sqs:SendMessage
+            - sqs:GetQueueUrl
+          Resource: '*'
+
+plugins:
+  - serverless-esbuild
+
+custom:
+  esbuild:
+    target: es2019
+    minify: true
+    bundle: true
+
+functions:
+  getTransferById:
+    handler: src/transfer.getTransferById
+    events:
+      - http:
+          method: GET
+          path: transfers/${transferId}
+
+resources:
+  Resources:
+    ProcessTransferQueue:
+      Type: AWS::SQS::Queue
+      Properties:
+        QueueName: ${self:provider.environment.TRANSFER_QUEUE}
+        VisibilityTimeout: 900
+        MessageRetentionPeriod: 3600

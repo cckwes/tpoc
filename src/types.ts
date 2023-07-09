@@ -1,23 +1,23 @@
 export type TransferQueueBody = {
   transferId: string;
-}
+};
 
 export type CheckTransferQueueBody = {
   transferId: string;
   transactionHash: string;
-}
+};
 
 export type Transfer = {
   id: string;
-  destinationAddress: string;
-  transactionHash?: string;
+  destination_address: string;
+  transaction_hash?: string;
   amount: string;
   status: string;
   employeeId: string;
   createdAt: string;
-}
+};
 
 export type Employee = {
   id: string;
-  walletAddress: string;
-}
+  wallet_address: string;
+};

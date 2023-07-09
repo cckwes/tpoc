@@ -2,12 +2,15 @@ service: tpoc
 
 provider:
   name: aws
-  stage: ${opt:stage, 'dev'}
+  stage: ${opt.stage, 'dev'}
   region: ap-southeast-1
   runtime: nodejs16.x
   environment:
-    TRANSFER_QUEUE: ${self:provder.stage}-transfer-queue
-    CHECK_TRANSFER_QUEUE: ${self:provider.stage}-check-transfer-queue
+    TRANSFER_QUEUE: ${sls:stage}-transfer-queue
+    CHECK_TRANSFER_QUEUE: ${sls:stage}-check-transfer-queue
+    DATABASE_URL: ${ssm:/aws/reference/secretsmanager/tpoc-secret/databaseUrl}
+    ACCOUNT_PRIVATE_KEY: ${ssm:/aws/reference/secretsmanager/tpoc-secret/accountPrivateKey}
+    INFURA_URL: ${ssm:/aws/reference/secretsmanager/tpoc-secret/infuraUrl}
   iam:
     role:
       statements:
@@ -19,9 +22,10 @@ provider:
             - sqs:SendMessage
             - sqs:GetQueueUrl
           Resource: '*'
-
-plugins:
-  - serverless-esbuild
+        - Effect: 'Allow'
+          Action:
+            - 'secretsmanager:GetSecretValue'
+          Resource: 'arn:aws:secretsmanager:ap-southeast-1:960458344811:secret:tpoc-secret*'
 
 custom:
   esbuild:
@@ -29,13 +33,16 @@ custom:
     minify: true
     bundle: true
 
+plugins:
+  - serverless-esbuild
+
 functions:
   getTransferById:
     handler: src/endpoints.getTransferById
     events:
       - http:
           method: GET
-          path: transfers/${transferId}
+          path: transfers/{transferId}
   createTransfer:
     handler: src/endpoints.createTransfer
     events:
@@ -44,13 +51,13 @@ functions:
           path: transfers
   processTransfer:
     handler: src/transfer.processTransfer
-    reservedConcurrency: 1
+    # reservedConcurrency: 1
     events:
       - sqs:
           arn: !GetAtt ProcessTransferQueue.Arn
   checkTransfer:
     handler: src/transfer.checkTransfer
-    reservedConcurrency: 1
+    # reservedConcurrency: 1
     events:
       - sqs:
           arn: !GetAtt CheckTransferQueue.Arn

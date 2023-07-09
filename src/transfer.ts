@@ -1,110 +1,98 @@
-import { APIGatewayProxyEvent, APIGatewayProxyResult } from 'aws-lambda';
+import { SQSEvent } from "aws-lambda";
 import { Client } from 'pg';
+import * as ethers from 'ethers';
 import { SQS } from 'aws-sdk';
+import { usdtContractAddress, usdtContractAbi } from './data';
+import { CheckTransferQueueBody, Transfer, TransferQueueBody } from "./types";
 
+const accountPrivateKey = process.env.ACCOUNT_PRIVATE_KEY;
+const databaseUrl = process.env.DATABASE_URL;
+const infuraUrl = process.env.INFURA_URL;
 const sqs = new SQS();
-const QUEUE_URL = process.env.TRANSFER_QUEUE
-const databaseURL = 'postgres://hzwkzwsk:ceueN7oQTORFeSVP_IxkuJnqwQH3xt7q@satao.db.elephantsql.com/hzwkzwsk';
+const checkTransferQueueUrl = process.env.CHECK_TRANSFER_QUEUE;
+const network = 'sepolia';
 
-const returnError = (statusCode: number, message: string) => {
-  return {
-    statusCode,
-    body: JSON.stringify({
-      message,
-    })
-  }
-}
+export const processTransfer = async (event: SQSEvent) => {
+  for (const record of event.Records) {
+    const { transferId } = JSON.parse(record.body) as TransferQueueBody;
 
-const returnResult = <T>(result: T) => {
-  return {
-    statusCode: 200,
-    body: JSON.stringify(result)
-  }
-}
-
-const returnUnchanged = () => {
-  return {
-    statusCode: 304,
-    body: JSON.stringify({
-      message: 'OK',
-    })
-  }
-}
-
-export const getTransferById = async (event: APIGatewayProxyEvent): Promise<APIGatewayProxyResult> => {
-  const { transferId } = event.pathParameters;
-
-  const client = new Client(databaseURL);
-  await client.connect();
-
-  const result = await client.query({
-    text: 'SELECT * FROM public.transfer WHERE id = $1',
-    values: [transferId]
-  });
-
-  if (result.rowCount === 0) {
-    return returnError(404, 'Transaction not found');
-  }
-
-  return returnResult(result.rows[0]);
-}
-
-export const createTransfer = async (event: APIGatewayProxyEvent): Promise<APIGatewayProxyResult> => {
-  const headers = event.headers;
-  const idempotencyKey = headers['X-Idempotency-Key'];
-  const parsedBody = JSON.parse(event.body);
-  const { employeeId, amount } = parsedBody;
-
-  const client = new Client(databaseURL);
-  await client.connect();
-
-  let isRetry = false;
-  try {
-    await client.query('BEGIN TRANSACTION ISOLATION LEVEL SERIALIZABLE');
-    const result = await client.query({text: 'SELECT * FROM public.idempotency WHERE key = $1', values: [idempotencyKey]})
+    const client = new Client(databaseUrl);
+    await client.connect();
+    const result = await client.query({
+      text: 'SELECT * FROM public.transfer WHERE id = $1',
+      values: [transferId],
+    });
 
     if (result.rowCount === 0) {
-      await client.query({
-        text: 'INSERT INTO public.idempotency(key) VALUES($1)',
-        values: [idempotencyKey],
-      })
-      await client.query('COMMIT');
-    } else {
-      isRetry = true;
-      await client.query('ROLLBACK');
+      console.error(`Cannot find transfer with id ${transferId}`);
+      return;
     }
-  } catch (error) {
-    console.error(error);
-    await client.query('ROLLBACK');
+
+    const transfer = result.rows[0] as Transfer;
+    const wallet = new ethers.Wallet(accountPrivateKey);
+    const provider = new ethers.JsonRpcProvider(infuraUrl, network);
+    const account = wallet.connect(provider);
+    const usdt = new ethers.Contract(usdtContractAddress, usdtContractAbi, account);
+    const to = ethers.getAddress(transfer.destinationAddress);
+    const value = ethers.parseUnits(transfer.amount, 6);
+
+    const walletBalance = await usdt.balanceOf(account.address);
+
+    if (walletBalance.lt(value)) {
+      await client.query({
+        text: 'UPDATE public.transfer SET status = $1 WHERE id = $2',
+        values: ['INSUFFICIENT_BALANCE', transferId],
+      });
+      console.error(`Can not create transaction for id ${transferId} because insufficient wallet balance`);
+
+      return;
+    }
+
+    const tx = await usdt.transfer(to, value, { gasLimit: 3e6 });
+
+    await client.query({
+      text: 'UPDATE public.transfer SET status = $1, transactionHash = $2 WHERE id = $3',
+      values: ['CREATED', tx.hash, transferId],
+    });
+
+    await sqs.sendMessage({
+      MessageBody: JSON.stringify({
+        transferId,
+        transactionHash: tx.hash,
+      }),
+      QueueUrl: checkTransferQueueUrl,
+      DelaySeconds: 60,
+    }).promise();
   }
+}
 
-  if (isRetry) {
-    return returnUnchanged();
+export const checkTransfer = async (event: SQSEvent) => {
+  for (const record of event.Records) {
+    const { transferId, transactionHash } = JSON.parse(record.body) as CheckTransferQueueBody;
+
+    const client = new Client(databaseUrl);
+    await client.connect();
+    const provider = new ethers.JsonRpcProvider(infuraUrl, network);
+    const transactionReceipt = await provider.getTransactionReceipt(transactionHash);
+
+    if (transactionReceipt == null) {
+      await sqs.sendMessage({
+        MessageBody: JSON.stringify({
+          transferId,
+          transactionHash,
+        }),
+        QueueUrl: checkTransferQueueUrl,
+        DelaySeconds: 60,
+      }).promise();
+
+      return;
+    }
+
+    const transactionStatus = ((!!transactionReceipt.status && transactionReceipt.status === 1) || !!transactionReceipt.blockNumber) ? 'CONFIRMED' : 'REVERTED';
+
+    await client.query({
+      text: 'UPDATE public.transfer SET status = $1, WHERE id = $2',
+      values: [transactionStatus, transferId],
+    })
   }
-
-  const employees = await client.query({
-    text: 'SELECT * FROM public.employee WHERE id = $1',
-    values: [employeeId]
-  });
-  if (employees.rowCount === 0) {
-    return returnError(404, 'Employee not found');
-  }
-  const [employee] = employees.rows;
-
-  const destinationAddress = employee.walletAddress;
-  const insertResult = await client.query({
-    text: 'INSERT INTO public.transfer(employeeId, createdAt, status, destinationAddress, amount) VALUES($1, $2, $3, $4, $5) RETURNING id',
-    values: [employeeId, new Date().toISOString(), 'PENDING', destinationAddress, amount],
-  })
-  const transferId = insertResult.rows[0].id;
-
-  await sqs.sendMessage({
-    MessageBody: JSON.stringify({
-      transferId,
-    }),
-    QueueUrl: QUEUE_URL,
-  }).promise();
-
-
-  return returnResult({ transferId })
 }

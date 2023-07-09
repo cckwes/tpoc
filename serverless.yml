@@ -7,6 +7,7 @@ provider:
   runtime: nodejs16.x
   environment:
     TRANSFER_QUEUE: ${self:provder.stage}-transfer-queue
+    CHECK_TRANSFER_QUEUE: ${self:provider.stage}-check-transfer-queue
   iam:
     role:
       statements:
@@ -30,11 +31,29 @@ custom:
 
 functions:
   getTransferById:
-    handler: src/transfer.getTransferById
+    handler: src/endpoints.getTransferById
     events:
       - http:
           method: GET
           path: transfers/${transferId}
+  createTransfer:
+    handler: src/endpoints.createTransfer
+    events:
+      - http:
+          method: POST
+          path: transfers
+  processTransfer:
+    handler: src/transfer.processTransfer
+    reservedConcurrency: 1
+    events:
+      - sqs:
+          arn: !GetAtt ProcessTransferQueue.Arn
+  checkTransfer:
+    handler: src/transfer.checkTransfer
+    reservedConcurrency: 1
+    events:
+      - sqs:
+          arn: !GetAtt CheckTransferQueue.Arn
 
 resources:
   Resources:
@@ -42,5 +61,11 @@ resources:
       Type: AWS::SQS::Queue
       Properties:
         QueueName: ${self:provider.environment.TRANSFER_QUEUE}
+        VisibilityTimeout: 900
+        MessageRetentionPeriod: 3600
+    CheckTransferQueue:
+      Type: AWS::SQS::Queue
+      Properties:
+        QueueName: ${self:provider.environment.CHECK_TRANSFER_QUEUE}
         VisibilityTimeout: 900
         MessageRetentionPeriod: 3600

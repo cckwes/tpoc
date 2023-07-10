@@ -51,13 +51,13 @@ functions:
           path: transfers
   processTransfer:
     handler: src/transfer.processTransfer
+    # disable for now cause lambda concurrency quota is under 100 right now
     # reservedConcurrency: 1
     events:
       - sqs:
           arn: !GetAtt ProcessTransferQueue.Arn
   checkTransfer:
     handler: src/transfer.checkTransfer
-    # reservedConcurrency: 1
     events:
       - sqs:
           arn: !GetAtt CheckTransferQueue.Arn
